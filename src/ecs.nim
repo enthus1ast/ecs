@@ -30,6 +30,8 @@ proc getComponent*[T](reg: Registry, ent: Entity): T =
   let componentHash = ($T).hash()
   if not reg.components.hasKey(componentHash):
     raise newException(ValueError, "No store for this component: " & $(T))
+  if not reg.validEntities.contains((int)ent):
+    raise newException(ValueError, "Entity " & $ent & " is invalidated!")
   if not reg.components[componentHash].hasKey(ent):
     raise newException(ValueError, "Entity " & $ent & " has no component:" & $(T))
   return (T) reg.components[componentHash][ent]
@@ -56,6 +58,8 @@ proc hasComponent[T](reg: Registry, ent: Entity): bool =
   let componentHash = ($T).hash()
   if not reg.components.hasKey(componentHash):
     return false # when no store exists entity cannot have the component
+  if not reg.validEntities.contains((int)ent):
+    return false
   return reg.components[componentHash].hasKey(ent)
 
 proc hasComponent*(reg: Registry, ent: Entity, T: typedesc): bool =
