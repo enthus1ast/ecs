@@ -8,6 +8,7 @@ type
     validEntities: IntSet
     invalideEntities: IntSet
     components: TableRef[Hash, ComponentStore]
+  ComponentObj* = object of RootObj
   Component* = ref object of RootObj
 
 proc newRegistry*(): Registry =
@@ -117,9 +118,10 @@ when isMainModule:
         Health = ref object of Component
           health: int
           maxHealth: int
-        Mana = ref object of Component
+        ManaObj = object of Component
           mana: int
           maxMana: int
+        Mana = ref ManaObj
         Kaka = ref object of Component ## This is never used
           mana: int
           maxMana: int
@@ -185,3 +187,39 @@ when isMainModule:
         check reg.validEntities.len == 0
         check reg.getStore(Health).len == 0
         check reg.getStore(Mana).len == 0
+    test "modify":
+      block:
+        reg = newRegistry()
+        var e1 = reg.newEntity()
+        reg.addComponent(e1, Health(health: 10, maxHealth: 100))
+        reg.getComponent(e1, Health).health = 50
+        check reg.getComponent(e1, Health).health == 50
+    test "destructor":
+      ## This test should test how a destructor could be called by the ecs.
+      ## But this does not work properly yet.
+      ## The feature that the ecs SHOULD have is:
+      ## getComponent() should return a modifiable version of the componet (ref type)
+      ##   BUT should also call a destructor when destroyed. Eg:
+      ##   A component like:
+      ## ComplexComponent = object of Component
+      ##   anEntity: Entity
+      ##   anotherEntity: Entity
+      ## should (maybe) remove `anEntity` and `anotherEntity` when removed.
+      block:
+        var wasDestructed = false
+        proc `=destroy`(comp: var ManaObj) = # Must be ManaObj (see above in type section)
+          echo "DESTRUCT MANA WAS:", comp.mana
+          wasDestructed = true
+        proc innerProc() =
+          reg = newRegistry()
+          var e1 = reg.newEntity()
+          reg.addComponent(e1, Mana(mana: 123))
+          check reg.getComponent(e1, Mana).mana == 123
+          reg.removeComponent(e1, Mana)
+        innerProc()
+        innerProc() ##
+        innerProc()
+        GC_fullCollect() # to force the calling of destructor in normal gc mode
+        GC_fullCollect() # to force the calling of destructor in normal gc mode
+        GC_fullCollect() # to force the calling of destructor in normal gc mode
+        check wasDestructed == true
