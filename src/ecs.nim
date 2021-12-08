@@ -3,11 +3,14 @@ import tables, hashes, intsets
 type
   Entity* = uint32
   ComponentStore* = TableRef[Entity, Component]
+  ComponentDestructor* = proc (reg: Registry, comp: Component)  #{.closure.}
+  ComponentDestructors* = TableRef[Hash, ComponentDestructor]
   Registry* = ref object
     entityLast*: Entity
     validEntities*: IntSet
     invalideEntities*: IntSet
     components: TableRef[Hash, ComponentStore]
+    componentDestructors: ComponentDestructors
   ComponentObj* = object of RootObj
   Component* = ref object of RootObj
 
@@ -15,11 +18,17 @@ proc newRegistry*(): Registry =
   result = Registry()
   result.entityLast = 0
   result.components = newTable[Hash, ComponentStore]()
+  result.componentDestructors = newTable[Hash, ComponentDestructor]()
 
 proc newEntity*(reg: Registry): Entity =
   reg.entityLast.inc
   reg.validEntities.incl((int) reg.entityLast)
   return reg.entityLast
+
+proc addComponentDestructor*[T](reg: Registry, comp: typedesc[T], cb: ComponentDestructor) =
+  let componentHash = ($T).hash()
+  reg.componentDestructors[componentHash] = cb
+  discard
 
 proc addComponent*[T](reg: Registry, ent: Entity, comp: T) =
   let componentHash = ($T).hash()
@@ -48,6 +57,9 @@ proc removeComponent*[T](reg: Registry, ent: Entity) =
     raise newException(ValueError, "No store for this component: " & $(T))
   if not reg.components[componentHash].hasKey(ent):
     return
+  if reg.componentDestructors.hasKey(componentHash):
+    let dest = reg.componentDestructors[componentHash] # (reg, reg.components[componentHash][ent])
+    dest(reg, reg.components[componentHash][ent])
   reg.components[componentHash].del(ent)
 
 proc removeComponent*(reg: Registry, ent: Entity, T: typedesc) =
@@ -94,7 +106,7 @@ proc cleanup*(reg: Registry) =
 
 proc destroyAll*(reg: Registry) =
   ## removes all entities
-  let buf = reg.validEntities # buffer needet because iterating while deleting does not work
+  let buf = reg.validEntities # buffer needed because iterating while deleting does not work
   for ent in buf:
     reg.destroyEntity((Entity) ent)
 
@@ -228,3 +240,15 @@ when isMainModule:
         innerProc() ## second time, needet for default gc to make the test true
         GC_fullCollect() # to force the calling of destructor in normal gc mode
         check wasDestructed == true
+    test "destructorInternal":
+      reg = newRegistry()
+      var ee = reg.newEntity()
+      reg.addComponent(ee, Health(health: 123))
+      type CObj = object
+        ss: string
+      var cobj = CObj(ss: "foo")
+      proc healthDestructor(reg: Registry, comp: Component) =
+        echo cobj.ss
+        echo "In health destructor:", $(Health(comp).health)
+      reg.addComponentDestructor(Health, healthDestructor)
+      reg.removeComponent(ee, Health)
