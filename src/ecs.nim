@@ -3,7 +3,7 @@ import tables, hashes, intsets
 type
   Entity* = uint32
   ComponentStore* = TableRef[Entity, Component]
-  ComponentDestructor* = proc (reg: Registry, comp: Component)  #{.closure.}
+  ComponentDestructor* = proc (reg: Registry, entity: Entity, comp: Component)  #{.closure.}
   ComponentDestructors* = TableRef[Hash, ComponentDestructor]
   Registry* = ref object
     entityLast*: Entity
@@ -71,7 +71,7 @@ proc removeComponent*[T](reg: Registry, ent: Entity) {.inline.} =
     return
   if reg.componentDestructors.hasKey(componentHash):
     let dest = reg.componentDestructors[componentHash] # (reg, reg.components[componentHash][ent])
-    dest(reg, reg.components[componentHash][ent])
+    dest(reg, ent, reg.components[componentHash][ent])
   reg.components[componentHash].del(ent)
 
 proc removeComponent*(reg: Registry, ent: Entity, T: typedesc) {.inline.} =
@@ -110,7 +110,7 @@ proc destroyEntity*(reg: Registry, ent: Entity) {.inline.} =
   for compHash, store in reg.components.pairs:
     if reg.componentDestructors.hasKey(compHash):
       var dest = reg.componentDestructors[compHash]
-      dest(reg, store[ent])
+      dest(reg, ent, store[ent])
     store.del(ent)
   reg.validEntities.excl(int ent)
 
@@ -267,10 +267,10 @@ when isMainModule:
         ss: string
         cnt: int
       var cobj = CObj(ss: "foo")
-      proc healthDestructor(reg: Registry, comp: Component) =
+      proc healthDestructor(reg: Registry, ent: Entity,  comp: Component) =
         echo cobj.ss # <- bound object
         cobj.cnt.inc
-        echo "In health destructor destructorInternalExplicitly:", $(Health(comp).health)
+        echo "In health destructor destructorInternalExplicitly:", $ent, " ", $(Health(comp).health)
       reg.addComponentDestructor(Health, healthDestructor)
       reg.removeComponent(ee, Health)
       check cobj.cnt == 1
@@ -282,10 +282,10 @@ when isMainModule:
         ss: string
         cnt: int
       var cobj = CObj(ss: "foo", cnt: 0)
-      proc healthDestructor(reg: Registry, comp: Component) =
+      proc healthDestructor(reg: Registry, ent: Entity, comp: Component) =
         echo cobj.ss # <- bound object
         cobj.cnt.inc
-        echo "In health destructor destructorInternalImplicitly: ", $(Health(comp).health)
+        echo "In health destructor destructorInternalImplicitly: ", $ent, " ", $(Health(comp).health)
       reg.addComponentDestructor(Health, healthDestructor)
       reg.destroyEntity(ee)
       reg.cleanup()
