@@ -26,9 +26,19 @@ proc newEntity*(reg: Registry): Entity =
   return reg.entityLast
 
 proc addComponentDestructor*[T](reg: Registry, comp: typedesc[T], cb: ComponentDestructor) =
+  ## Registers a destructor which gets called on component destruction
+  ## ComponentDestructor can be closures eg:
+  ## .. code-block:: nim
+  ##  type CObj = object
+  ##    ss: string
+  ##  var cobj = CObj(ss: "foo")
+  ##  proc healthDestructor(reg: Registry, comp: Component) =
+  ##    echo cobj.ss # <- bound object
+  ##    echo "In health destructor:", $(Health(comp).health)
+  ##  reg.addComponentDestructor(Health, healthDestructor) # <- register destructor
+  ##  reg.removeComponent(ee, Health) # <- calls the destructor then removes the component
   let componentHash = ($T).hash()
   reg.componentDestructors[componentHash] = cb
-  discard
 
 proc addComponent*[T](reg: Registry, ent: Entity, comp: T) =
   let componentHash = ($T).hash()
@@ -52,6 +62,8 @@ proc getComponent*(reg: Registry, ent: Entity, T: typedesc): T =
   return getComponent[T](reg, ent)
 
 proc removeComponent*[T](reg: Registry, ent: Entity) =
+  ## removes a component, also calls it destructor
+  ## previously registered with `addComponentDestructor`
   let componentHash = ($T).hash()
   if not reg.components.hasKey(componentHash):
     raise newException(ValueError, "No store for this component: " & $(T))
@@ -81,7 +93,9 @@ proc hasComponent*(reg: Registry, ent: Entity, T: typedesc): bool =
   hasComponent[T](reg, ent)
 
 proc invalidateEntity*(reg: Registry, ent: Entity) =
-  ## Invalidates an entity, this can be called in a loop, make sure you call "cleanup()" once in a while to remove invalidated entities
+  ## Invalidates an entity, this can be called in a loop,
+  ## make sure you call `cleanup()` once in a while to remove invalidated entities
+  ## This does NOT call the Component destructor immediately, `cleanup` will
   reg.validEntities.excl(int ent)
   reg.invalideEntities.incl(int ent)
 
@@ -93,19 +107,24 @@ proc invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) =
 proc destroyEntity*(reg: Registry, ent: Entity) =
   ## removes all registered components for this entity
   ## this cannot be called while iterating over components, use invalidateEntity for this
-  for store in reg.components.values:
+  for compHash, store in reg.components.pairs:
+    if reg.componentDestructors.hasKey(compHash):
+      var dest = reg.componentDestructors[compHash]
+      dest(reg, store[ent])
     store.del(ent)
   reg.validEntities.excl(int ent)
 
 proc cleanup*(reg: Registry) =
   ## removes all invalidated entities
   ## call this periodically.
+  ## Note: This calls the component destructors (if any)
+  ## of previously invalidated objects!
   for ent in reg.invalideEntities:
     reg.destroyEntity((Entity) ent)
   reg.invalideEntities.clear()
 
 proc destroyAll*(reg: Registry) =
-  ## removes all entities
+  ## removes all entities, calls the component destructors (if any)
   let buf = reg.validEntities # buffer needed because iterating while deleting does not work
   for ent in buf:
     reg.destroyEntity((Entity) ent)
@@ -240,15 +259,34 @@ when isMainModule:
         innerProc() ## second time, needet for default gc to make the test true
         GC_fullCollect() # to force the calling of destructor in normal gc mode
         check wasDestructed == true
-    test "destructorInternal":
+    test "destructorInternalExplicitly":
       reg = newRegistry()
       var ee = reg.newEntity()
       reg.addComponent(ee, Health(health: 123))
       type CObj = object
         ss: string
+        cnt: int
       var cobj = CObj(ss: "foo")
       proc healthDestructor(reg: Registry, comp: Component) =
-        echo cobj.ss
-        echo "In health destructor:", $(Health(comp).health)
+        echo cobj.ss # <- bound object
+        cobj.cnt.inc
+        echo "In health destructor destructorInternalExplicitly:", $(Health(comp).health)
       reg.addComponentDestructor(Health, healthDestructor)
       reg.removeComponent(ee, Health)
+      check cobj.cnt == 1
+    test "destructorInternalImplicitly":
+      reg = newRegistry()
+      var ee = reg.newEntity()
+      reg.addComponent(ee, Health(health: 321))
+      type CObj = ref object
+        ss: string
+        cnt: int
+      var cobj = CObj(ss: "foo", cnt: 0)
+      proc healthDestructor(reg: Registry, comp: Component) =
+        echo cobj.ss # <- bound object
+        cobj.cnt.inc
+        echo "In health destructor destructorInternalImplicitly: ", $(Health(comp).health)
+      reg.addComponentDestructor(Health, healthDestructor)
+      reg.destroyEntity(ee)
+      reg.cleanup()
+      check cobj.cnt == 1
