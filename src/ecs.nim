@@ -20,7 +20,7 @@ proc newRegistry*(): Registry =
   result.components = newTable[Hash, ComponentStore]()
   result.componentDestructors = newTable[Hash, ComponentDestructor]()
 
-proc newEntity*(reg: Registry): Entity =
+proc newEntity*(reg: Registry): Entity {.inline.} =
   reg.entityLast.inc
   reg.validEntities.incl((int) reg.entityLast)
   return reg.entityLast
@@ -40,13 +40,13 @@ proc addComponentDestructor*[T](reg: Registry, comp: typedesc[T], cb: ComponentD
   let componentHash = ($T).hash()
   reg.componentDestructors[componentHash] = cb
 
-proc addComponent*[T](reg: Registry, ent: Entity, comp: T) =
+proc addComponent*[T](reg: Registry, ent: Entity, comp: T) {.inline.} =
   let componentHash = ($T).hash()
   if not reg.components.hasKey(componentHash):
     reg.components[componentHash] = newTable[Entity, Component]()
   reg.components[componentHash][ent] = comp
 
-proc getComponent*[T](reg: Registry, ent: Entity): T =
+proc getComponent*[T](reg: Registry, ent: Entity): T {.inline.} =
   let componentHash = ($T).hash()
   if not reg.components.hasKey(componentHash):
     raise newException(ValueError, "No store for this component: " & $(T))
@@ -56,12 +56,12 @@ proc getComponent*[T](reg: Registry, ent: Entity): T =
     raise newException(ValueError, "Entity " & $ent & " has no component:" & $(T))
   return (T) reg.components[componentHash][ent]
 
-proc getComponent*(reg: Registry, ent: Entity, T: typedesc): T =
+proc getComponent*(reg: Registry, ent: Entity, T: typedesc): T {.inline.} =
   ## convenient proc to enable this:
   ##  reg.getComponent(FooComponent, ent)
   return getComponent[T](reg, ent)
 
-proc removeComponent*[T](reg: Registry, ent: Entity) =
+proc removeComponent*[T](reg: Registry, ent: Entity) {.inline.} =
   ## removes a component, also calls it destructor
   ## previously registered with `addComponentDestructor`
   let componentHash = ($T).hash()
@@ -74,12 +74,12 @@ proc removeComponent*[T](reg: Registry, ent: Entity) =
     dest(reg, reg.components[componentHash][ent])
   reg.components[componentHash].del(ent)
 
-proc removeComponent*(reg: Registry, ent: Entity, T: typedesc) =
+proc removeComponent*(reg: Registry, ent: Entity, T: typedesc) {.inline.} =
   ## convenient proc to enable this:
   ##  reg.removeComponent(FooComponent, ent)
   removeComponent[T](reg, ent)
 
-proc hasComponent[T](reg: Registry, ent: Entity): bool =
+proc hasComponent[T](reg: Registry, ent: Entity): bool {.inline.} =
   let componentHash = ($T).hash()
   if not reg.components.hasKey(componentHash):
     return false # when no store exists entity cannot have the component
@@ -87,24 +87,24 @@ proc hasComponent[T](reg: Registry, ent: Entity): bool =
     return false
   return reg.components[componentHash].hasKey(ent)
 
-proc hasComponent*(reg: Registry, ent: Entity, T: typedesc): bool =
+proc hasComponent*(reg: Registry, ent: Entity, T: typedesc): bool {.inline.} =
   ## convenient proc to enable this:
   ##  reg.hasComponent(FooComponent, ent)
   hasComponent[T](reg, ent)
 
-proc invalidateEntity*(reg: Registry, ent: Entity) =
+proc invalidateEntity*(reg: Registry, ent: Entity) {.inline.} =
   ## Invalidates an entity, this can be called in a loop,
   ## make sure you call `cleanup()` once in a while to remove invalidated entities
   ## This does NOT call the Component destructor immediately, `cleanup` will
   reg.validEntities.excl(int ent)
   reg.invalideEntities.incl(int ent)
 
-proc invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) =
+proc invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) {.inline.} =
   for ent in reg.validEntities:
     if not filter.contains(ent):
       reg.invalidateEntity(ent.Entity)
 
-proc destroyEntity*(reg: Registry, ent: Entity) =
+proc destroyEntity*(reg: Registry, ent: Entity) {.inline.} =
   ## removes all registered components for this entity
   ## this cannot be called while iterating over components, use invalidateEntity for this
   for compHash, store in reg.components.pairs:
@@ -114,7 +114,7 @@ proc destroyEntity*(reg: Registry, ent: Entity) =
     store.del(ent)
   reg.validEntities.excl(int ent)
 
-proc cleanup*(reg: Registry) =
+proc cleanup*(reg: Registry) {.inline.} =
   ## removes all invalidated entities
   ## call this periodically.
   ## Note: This calls the component destructors (if any)
@@ -123,13 +123,13 @@ proc cleanup*(reg: Registry) =
     reg.destroyEntity((Entity) ent)
   reg.invalideEntities.clear()
 
-proc destroyAll*(reg: Registry) =
+proc destroyAll*(reg: Registry) {.inline.} =
   ## removes all entities, calls the component destructors (if any)
   let buf = reg.validEntities # buffer needed because iterating while deleting does not work
   for ent in buf:
     reg.destroyEntity((Entity) ent)
 
-iterator entities*(reg: Registry, T: typedesc, invalidate = false): Entity =
+iterator entities*(reg: Registry, T: typedesc, invalidate = false): Entity {.inline.} =
   let componentHash = ($T).hash()
   if reg.components.hasKey(componentHash):
     # raise newException(ValueError, "No store for this component: " & $(T)) # TODO raise?
@@ -137,7 +137,7 @@ iterator entities*(reg: Registry, T: typedesc, invalidate = false): Entity =
       if invalidate or reg.validEntities.contains((int)ent):
         yield ent
 
-proc getStore*(reg: Registry, T: typedesc): ComponentStore =
+proc getStore*(reg: Registry, T: typedesc): ComponentStore {.inline.} =
   let componentHash = ($T).hash()
   return reg.components[componentHash]
 
