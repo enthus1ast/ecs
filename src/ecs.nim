@@ -4,9 +4,9 @@ type
   Entity* = uint32
   ComponentStore* = TableRef[Entity, Component]
   Registry* = ref object
-    entityLast: Entity
-    validEntities: IntSet
-    invalideEntities: IntSet
+    entityLast*: Entity
+    validEntities*: IntSet
+    invalideEntities*: IntSet
     components: TableRef[Hash, ComponentStore]
   ComponentObj* = object of RootObj
   Component* = ref object of RootObj
@@ -72,6 +72,11 @@ proc invalidateEntity*(reg: Registry, ent: Entity) =
   ## Invalidates an entity, this can be called in a loop, make sure you call "cleanup()" once in a while to remove invalidated entities
   reg.validEntities.excl(int ent)
   reg.invalideEntities.incl(int ent)
+
+proc invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) =
+  for ent in reg.validEntities:
+    if not filter.contains(ent):
+      reg.invalidateEntity(ent.Entity)
 
 proc destroyEntity*(reg: Registry, ent: Entity) =
   ## removes all registered components for this entity
@@ -216,10 +221,10 @@ when isMainModule:
           reg.addComponent(e1, Mana(mana: 123))
           check reg.getComponent(e1, Mana).mana == 123
           reg.removeComponent(e1, Mana)
+
+        ## Must be written multiple times that something happens, strange
+        ## TODO test if this is the same issue: https://github.com/nim-lang/Nim/issues/15629
         innerProc()
-        innerProc() ##
-        innerProc()
-        GC_fullCollect() # to force the calling of destructor in normal gc mode
-        GC_fullCollect() # to force the calling of destructor in normal gc mode
+        innerProc() ## second time, needet for default gc to make the test true
         GC_fullCollect() # to force the calling of destructor in normal gc mode
         check wasDestructed == true
