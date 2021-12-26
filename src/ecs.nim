@@ -3,7 +3,7 @@ import tables, hashes, intsets
 type
   Entity* = uint32
   ComponentStore* = TableRef[Entity, Component]
-  ComponentDestructor* = proc (reg: Registry, entity: Entity, comp: Component)  #{.closure.}
+  ComponentDestructor* = proc (reg: Registry, entity: Entity, comp: Component) {.gcsafe.}  #{.closure.}
   ComponentDestructors* = TableRef[Hash, ComponentDestructor]
   Registry* = ref object
     entityLast*: Entity
@@ -104,14 +104,15 @@ proc invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) {.inline.} =
     if not filter.contains(ent):
       reg.invalidateEntity(ent.Entity)
 
-proc destroyEntity*(reg: Registry, ent: Entity) {.inline.} =
+proc destroyEntity*(reg: Registry, ent: Entity) {.inline, gcsafe.} =
   ## removes all registered components for this entity
   ## this cannot be called while iterating over components, use invalidateEntity for this
   for compHash, store in reg.components.pairs:
     if reg.componentDestructors.hasKey(compHash):
-      var dest = reg.componentDestructors[compHash]
-      dest(reg, ent, store[ent])
-    store.del(ent)
+      if store.hasKey(ent):
+        var dest = reg.componentDestructors[compHash]
+        dest(reg, ent, store[ent])
+        store.del(ent)
   reg.validEntities.excl(int ent)
 
 proc cleanup*(reg: Registry) {.inline.} =
@@ -267,7 +268,7 @@ when isMainModule:
         ss: string
         cnt: int
       var cobj = CObj(ss: "foo")
-      proc healthDestructor(reg: Registry, ent: Entity,  comp: Component) =
+      proc healthDestructor(reg: Registry, ent: Entity,  comp: Component) {.gcsafe.} =
         echo cobj.ss # <- bound object
         cobj.cnt.inc
         echo "In health destructor destructorInternalExplicitly:", $ent, " ", $(Health(comp).health)
@@ -282,7 +283,7 @@ when isMainModule:
         ss: string
         cnt: int
       var cobj = CObj(ss: "foo", cnt: 0)
-      proc healthDestructor(reg: Registry, ent: Entity, comp: Component) =
+      proc healthDestructor(reg: Registry, ent: Entity, comp: Component) {.gcsafe.} =
         echo cobj.ss # <- bound object
         cobj.cnt.inc
         echo "In health destructor destructorInternalImplicitly: ", $ent, " ", $(Health(comp).health)
