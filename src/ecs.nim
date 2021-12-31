@@ -100,6 +100,7 @@ proc invalidateEntity*(reg: Registry, ent: Entity) {.inline.} =
   reg.invalideEntities.incl(int ent)
 
 proc invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) {.inline.} =
+  ## invalidates all entities, except the ones in `filter`
   for ent in reg.validEntities:
     if not filter.contains(ent):
       reg.invalidateEntity(ent.Entity)
@@ -108,11 +109,11 @@ proc destroyEntity*(reg: Registry, ent: Entity) {.inline, gcsafe.} =
   ## removes all registered components for this entity
   ## this cannot be called while iterating over components, use invalidateEntity for this
   for compHash, store in reg.components.pairs:
-    if reg.componentDestructors.hasKey(compHash):
-      if store.hasKey(ent):
+    if store.hasKey(ent):
+      if reg.componentDestructors.hasKey(compHash):
         var dest = reg.componentDestructors[compHash]
         dest(reg, ent, store[ent])
-        store.del(ent)
+      store.del(ent)
   reg.validEntities.excl(int ent)
 
 proc cleanup*(reg: Registry) {.inline.} =
@@ -137,6 +138,14 @@ iterator entities*(reg: Registry, T: typedesc, invalidate = false): Entity {.inl
     for ent in reg.components[componentHash].keys:
       if invalidate or reg.validEntities.contains((int)ent):
         yield ent
+
+iterator entitiesWithComp*(reg: Registry, T: typedesc, invalidate = false): tuple[ent: Entity, comp: T] {.inline.} =
+  let componentHash = ($T).hash()
+  if reg.components.hasKey(componentHash):
+    # raise newException(ValueError, "No store for this component: " & $(T)) # TODO raise?
+    for ent, comp in reg.components[componentHash]:
+      if invalidate or reg.validEntities.contains((int)ent):
+        yield (ent: ent, comp: T(comp))
 
 proc getStore*(reg: Registry, T: typedesc): ComponentStore {.inline.} =
   let componentHash = ($T).hash()
@@ -245,7 +254,7 @@ when isMainModule:
       block:
         var wasDestructed = false
         proc `=destroy`(comp: var ManaObj) = # Must be ManaObj (see above in type section)
-          echo "DESTRUCT MANA WAS:", comp.mana
+          # echo "DESTRUCT MANA WAS:", comp.mana
           wasDestructed = true
         proc innerProc() =
           reg = newRegistry()
@@ -269,9 +278,9 @@ when isMainModule:
         cnt: int
       var cobj = CObj(ss: "foo")
       proc healthDestructor(reg: Registry, ent: Entity,  comp: Component) {.gcsafe.} =
-        echo cobj.ss # <- bound object
+        # echo cobj.ss # <- bound object
         cobj.cnt.inc
-        echo "In health destructor destructorInternalExplicitly:", $ent, " ", $(Health(comp).health)
+        # echo "In health destructor destructorInternalExplicitly:", $ent, " ", $(Health(comp).health)
       reg.addComponentDestructor(Health, healthDestructor)
       reg.removeComponent(ee, Health)
       check cobj.cnt == 1
@@ -284,10 +293,20 @@ when isMainModule:
         cnt: int
       var cobj = CObj(ss: "foo", cnt: 0)
       proc healthDestructor(reg: Registry, ent: Entity, comp: Component) {.gcsafe.} =
-        echo cobj.ss # <- bound object
+        # echo cobj.ss # <- bound object
         cobj.cnt.inc
-        echo "In health destructor destructorInternalImplicitly: ", $ent, " ", $(Health(comp).health)
+        # echo "In health destructor destructorInternalImplicitly: ", $ent, " ", $(Health(comp).health)
       reg.addComponentDestructor(Health, healthDestructor)
       reg.destroyEntity(ee)
       reg.cleanup()
       check cobj.cnt == 1
+    test "entitiesWithComp":
+      reg = newRegistry()
+      var ee1 = reg.newEntity()
+      reg.addComponent(ee1, Health(health: 123))
+      var ee2 = reg.newEntity()
+      reg.addComponent(ee2, Health(health: 321))
+      for (ent, compHealth) in reg.entitiesWithComp(Health):
+        compHealth.health = compHealth.health * 2
+      check reg.getComponent(ee1, Health).health == 246
+      check reg.getComponent(ee2, Health).health == 642
