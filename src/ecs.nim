@@ -14,6 +14,10 @@ type
   ComponentObj* = object of RootObj
   Component* = ref object of RootObj
 
+template incl*(intset: IntSet, ent: Entity) = intset.incl (int) ent
+template excl*(intset: IntSet, ent: Entity) = intset.excl (int) ent
+template contains*(intset: IntSet, ent: Entity): bool = intset.contains (int) ent
+
 proc newRegistry*(): Registry =
   result = Registry()
   result.entityLast = 0
@@ -22,7 +26,7 @@ proc newRegistry*(): Registry =
 
 proc newEntity*(reg: Registry): Entity {.inline.} =
   reg.entityLast.inc
-  reg.validEntities.incl((int) reg.entityLast)
+  reg.validEntities.incl(reg.entityLast)
   return reg.entityLast
 
 proc addComponentDestructor*[T](reg: Registry, comp: typedesc[T], cb: ComponentDestructor) =
@@ -37,23 +41,24 @@ proc addComponentDestructor*[T](reg: Registry, comp: typedesc[T], cb: ComponentD
   ##    echo "In health destructor:", $(Health(comp).health)
   ##  reg.addComponentDestructor(Health, healthDestructor) # <- register destructor
   ##  reg.removeComponent(ee, Health) # <- calls the destructor then removes the component
-  let componentHash = ($T).hash()
+  const componentHash = ($T).hash()
   reg.componentDestructors[componentHash] = cb
 
 proc addComponent*[T](reg: Registry, ent: Entity, comp: T) {.inline.} =
-  let componentHash = ($T).hash()
+  const componentHash = ($T).hash()
   if not reg.components.hasKey(componentHash):
     reg.components[componentHash] = newTable[Entity, Component]()
   reg.components[componentHash][ent] = comp
 
 proc getComponent*[T](reg: Registry, ent: Entity): T {.inline.} =
-  let componentHash = ($T).hash()
-  if not reg.components.hasKey(componentHash):
-    raise newException(ValueError, "No store for this component: " & $(T))
-  if not reg.validEntities.contains((int)ent):
-    raise newException(ValueError, "Entity " & $ent & " is invalidated!")
-  if not reg.components[componentHash].hasKey(ent):
-    raise newException(ValueError, "Entity " & $ent & " has no component:" & $(T))
+  const componentHash = ($T).hash()
+  when not defined(release):
+    if not reg.components.hasKey(componentHash):
+      raise newException(ValueError, "No store for this component: " & $(T))
+    if not reg.validEntities.contains(ent):
+      raise newException(ValueError, "Entity " & $ent & " is invalidated!")
+    if not reg.components[componentHash].hasKey(ent):
+      raise newException(ValueError, "Entity " & $ent & " has no component:" & $(T))
   return (T) reg.components[componentHash][ent]
 
 proc getComponent*(reg: Registry, ent: Entity, T: typedesc): T {.inline.} =
@@ -64,9 +69,10 @@ proc getComponent*(reg: Registry, ent: Entity, T: typedesc): T {.inline.} =
 proc removeComponent*[T](reg: Registry, ent: Entity) {.inline.} =
   ## removes a component, also calls it destructor
   ## previously registered with `addComponentDestructor`
-  let componentHash = ($T).hash()
-  if not reg.components.hasKey(componentHash):
-    raise newException(ValueError, "No store for this component: " & $(T))
+  const componentHash = ($T).hash()
+  when not defined(release):
+    if not reg.components.hasKey(componentHash):
+      raise newException(ValueError, "No store for this component: " & $(T))
   if not reg.components[componentHash].hasKey(ent):
     return
   if reg.componentDestructors.hasKey(componentHash):
@@ -80,7 +86,7 @@ proc removeComponent*(reg: Registry, ent: Entity, T: typedesc) {.inline.} =
   removeComponent[T](reg, ent)
 
 proc hasComponent[T](reg: Registry, ent: Entity): bool {.inline.} =
-  let componentHash = ($T).hash()
+  const componentHash = ($T).hash()
   if not reg.components.hasKey(componentHash):
     return false # when no store exists entity cannot have the component
   if not reg.validEntities.contains((int)ent):
@@ -96,8 +102,8 @@ proc invalidateEntity*(reg: Registry, ent: Entity) {.inline.} =
   ## Invalidates an entity, this can be called in a loop,
   ## make sure you call `cleanup()` once in a while to remove invalidated entities
   ## This does NOT call the Component destructor immediately, `cleanup` will
-  reg.validEntities.excl(int ent)
-  reg.invalideEntities.incl(int ent)
+  reg.validEntities.excl(ent)
+  reg.invalideEntities.incl(ent)
 
 proc invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) {.inline.} =
   ## invalidates all entities, except the ones in `filter`
@@ -114,7 +120,7 @@ proc destroyEntity*(reg: Registry, ent: Entity) {.inline, gcsafe.} =
         var dest = reg.componentDestructors[compHash]
         dest(reg, ent, store[ent])
       store.del(ent)
-  reg.validEntities.excl(int ent)
+  reg.validEntities.excl(ent)
 
 proc cleanup*(reg: Registry) {.inline.} =
   ## removes all invalidated entities
@@ -132,29 +138,64 @@ proc destroyAll*(reg: Registry) {.inline.} =
     reg.destroyEntity((Entity) ent)
 
 iterator entities*(reg: Registry, T: typedesc, invalidate = false): Entity {.inline.} =
-  let componentHash = ($T).hash()
+  const componentHash = ($T).hash()
   if reg.components.hasKey(componentHash):
     # raise newException(ValueError, "No store for this component: " & $(T)) # TODO raise?
     for ent in reg.components[componentHash].keys:
-      if invalidate or reg.validEntities.contains((int)ent):
+      if invalidate or reg.validEntities.contains(ent):
         yield ent
 
+# iterator entities[A](reg: Registry, aa: typedesc[A]): tuple[ent: Entity, a: A] =
+#   for ent in reg.entities(A):
+#     if reg.hasComponent(ent, aa) and reg.hasComponent(ent, bb):
+#       yield (ent: ent, a: reg.getComponent(ent, A), b: reg.getComponent(ent, B))
+# iterator entitiesWithComp2*(reg: Registry, T: typedesc, invalidate = false): tuple[ent: Entity, comp: T] {.inline.} =
+import sequtils, sets
+iterator entitiesWithComp2*[A, B](reg: Registry, aa: typedesc[A], bb: typedesc[B]): tuple[ent: Entity, a: A, b: B] =
+  let h1 = ($aa).hash()
+  let h2 = ($bb).hash()
+  if reg.components.hasKey(h1) and reg.components.hasKey(h2):
+    let hs1 = toHashSet[Entity](toSeq(reg.components[h1].keys()))
+    let hs2 = toHashSet[Entity](toSeq(reg.components[h2].keys()))
+    let res = hs1 * hs2
+    for ent in res:
+      yield (ent: ent, a: A reg.components[h1][ent], b: B reg.components[h2][ent])
+
+
+
 iterator entitiesWithComp*(reg: Registry, T: typedesc, invalidate = false): tuple[ent: Entity, comp: T] {.inline.} =
-  let componentHash = ($T).hash()
+  const componentHash = ($T).hash()
   if reg.components.hasKey(componentHash):
     # raise newException(ValueError, "No store for this component: " & $(T)) # TODO raise?
     for ent, comp in reg.components[componentHash]:
       if invalidate or reg.validEntities.contains((int)ent):
         yield (ent: ent, comp: T(comp))
 
+iterator entitiesWithCompSlow*[A](reg: Registry, aa: typedesc[A]): tuple[ent: Entity, a: A] {.inline.} =
+  # TODO SLOW! Remove!
+  for ent in reg.entities(A):
+      yield (ent: ent, a: reg.getComponent(ent, A))
+
+iterator entitiesWithComp*[A, B](reg: Registry, aa: typedesc[A], bb: typedesc[B]): tuple[ent: Entity, a: A, b: B] =
+  for ent, compA in reg.entitiesWithComp(A):
+    if reg.hasComponent(ent, bb):
+      yield (ent: ent, a: compA, b: reg.getComponent(ent, B))
+
+iterator entitiesWithComp*[A, B, C](reg: Registry, aa: typedesc[A], bb: typedesc[B], cc: typedesc[C]): tuple[ent: Entity, a: A, b: B, c: C] =
+  for ent, compA in reg.entitiesWithComp(A):
+    if reg.hasComponent(ent, bb) and reg.hasComponent(ent, cc):
+      yield (ent: ent, a: compA, b: reg.getComponent(ent, B), c: reg.getComponent(ent, C))
+
 proc getStore*(reg: Registry, T: typedesc): ComponentStore {.inline.} =
-  let componentHash = ($T).hash()
+  const componentHash = ($T).hash()
   return reg.components[componentHash]
+
+
 
 ##########################################
 # Tests
 ##########################################
-when isMainModule:
+when isMainModule and true:
   import unittest
   suite "ecs":
     setup:
@@ -310,3 +351,59 @@ when isMainModule:
         compHealth.health = compHealth.health * 2
       check reg.getComponent(ee1, Health).health == 246
       check reg.getComponent(ee2, Health).health == 642
+    test "entities with comp overloads":
+      reg = newRegistry()
+      var ee1 = reg.newEntity()
+      reg.addComponent(ee1, Health(health: 123))
+      var ee2 = reg.newEntity()
+      reg.addComponent(ee2, Health(health: 321))
+      reg.addComponent(ee2, Mana(mana: 321))
+      var idx = 0
+      for (ent, compHealth, compMana) in reg.entitiesWithComp(Health, Mana):
+        idx.inc
+        compHealth.health = compHealth.health * 2
+        compMana.mana = compMana.mana * 2
+      check idx == 1
+      check reg.getComponent(ee2, Health).health == 642
+      check reg.getComponent(ee2, Mana).mana == 642
+
+
+when isMainModule and false:
+  import benchy
+  type
+    Health = ref object of Component
+      health: int
+      maxHealth: int
+    ManaObj = object of Component
+      mana: int
+      maxMana: int
+    Mana = ref ManaObj
+  var reg = newRegistry()
+  for idx in 0..100_000:
+    var ee1 = reg.newEntity()
+    reg.addComponent(ee1, Health(health: 123))
+    var ee2 = reg.newEntity()
+    reg.addComponent(ee2, Health(health: 321))
+    reg.addComponent(ee2, Mana(mana: 321))
+
+  timeit "b1":
+    var idx = 0
+    for ent in reg.entities(Health):
+      let compHealth = reg.getComponent(ent, Health)
+      idx.inc
+  timeit "b2":
+    var idx = 0
+    for ent, compHealth in reg.entitiesWithCompSlow(Health):
+      idx.inc
+  timeit "b3":
+    var idx = 0
+    for ent, compHealth in reg.entitiesWithComp(Health):
+      idx.inc
+  timeit "2 (old)":
+    var idx = 0
+    for ent, compHealth, compMana in reg.entitiesWithComp(Health, Mana):
+      idx.inc
+  timeit "2 (new with hashset)":
+    var idx = 0
+    for ent, compHealth, compMana in reg.entitiesWithComp2(Health, Mana):
+      idx.inc
