@@ -1,7 +1,86 @@
-import tables, hashes, intsets
+## A simple Entity Component System.
+## With event system.
+runnableExamples:
+
+  var reg = newRegistry()
+
+  type
+    Health = ref object of Component
+      health: int
+      maxHealth: int
+      dead: bool
+    Regeneration = ref object of Component
+      healthRegen: int
+    Poisoned = ref object of Component
+      poisonStrength: int
+    Corpse = ref object of Component
+
+  var entPlayer = reg.newEntity() # a new Entity, store this and move this around.
+  reg.addComponent(entPlayer, Health(health: 50, maxHealth: 100))
+  reg.addComponent(entPlayer, Regeneration(healthRegen: 2))
+
+  var entPlayer2 = reg.newEntity() # a new Entity, store this and move this around.
+  reg.addComponent(entPlayer2, Health(health: 50, maxHealth: 100))
+  reg.addComponent(entPlayer2, Poisoned(poisonStrength: 1))
+
+  # Events example
+  type
+    EvDied = object
+      ent: Entity
+
+  proc cbDied(ev: EvDied) =
+    echo "entity died:", ev.ent
+    var compHealth = reg.getComponent(ev.ent, Health)
+    compHealth.dead = true
+
+    # remove the `Health` component upon dead
+    # reg.removeComponent(ev.ent, Health) # TODO cannot currently be done
+
+    echo "make this entity to a corpse"
+    reg.addComponent(ev.ent, Corpse())
+
+  reg.connect(EvDied, cbDied) # connect a callback to this event
+
+  proc systemHealth(reg: Registry) =
+    for (ent, compHealth) in reg.entitiesWithComp(Health):
+      if compHealth.dead: continue
+      echo ent, ": ", compHealth[]
+      if compHealth.health <= 0:
+        reg.trigger(EvDied(ent: ent)) # Triggers the EvDied event handlers
+        # reg.triggerLater(Ev)
+
+  proc systemPoison(reg: Registry) =
+    for (ent, compPoison, compHealth) in reg.entitiesWithComp(Poisoned, Health):
+      if not compHealth.dead:
+        compHealth.health -= compPoison.poisonStrength
+
+  proc systemRegen(reg: Registry) =
+    # regenerate health over time
+    for (ent, compRegeneration, compHealth) in reg.entitiesWithComp(Regeneration, Health):
+      if not compHealth.dead:
+        compHealth.health += compRegeneration.healthRegen
+        if compHealth.health > compHealth.maxHealth:
+          compHealth.health = compHealth.maxHealth
+
+  var limitExecution = 100
+  while true: ## games main loop
+
+    # do all the good stuff...
+
+    # Call systems
+    reg.systemRegen()
+    reg.systemPoison()
+    reg.systemHealth()
+
+    limitExecution -= 1
+    if limitExecution == 0: break
+
+# ----------------------- Implementation
+import tables, hashes, intsets, std/deques
+export tables, intsets
 
 type
-  Entity* = uint32
+  Entity* = int
   ComponentStore* = TableRef[Entity, Component]
   ComponentDestructor* = proc (reg: Registry, entity: Entity, comp: Component) {.gcsafe.}  #{.closure.}
   ComponentDestructors* = TableRef[Hash, ComponentDestructor]
@@ -11,68 +90,100 @@ type
     invalideEntities*: IntSet
     components: TableRef[Hash, ComponentStore]
     componentDestructors: ComponentDestructors
+    ev: Table[Hash, IntSet] ## container for events
+    # evs: Table[Hash, Deque[pointer]]
   ComponentObj* = object of RootObj
   Component* = ref object of RootObj
 
-template incl*(intset: IntSet, ent: Entity) = intset.incl (int) ent
-template excl*(intset: IntSet, ent: Entity) = intset.excl (int) ent
-template contains*(intset: IntSet, ent: Entity): bool = intset.contains (int) ent
-
 proc newRegistry*(): Registry =
+  ## Returns a new `Registry` this is the main object of the ECS
   result = Registry()
   result.entityLast = 0
   result.components = newTable[Hash, ComponentStore]()
   result.componentDestructors = newTable[Hash, ComponentDestructor]()
 
-proc newEntity*(reg: Registry): Entity {.inline.} =
-  reg.entityLast.inc
+
+proc newEntity*(reg: Registry, ent = -1): Entity {.inline.} =
+  ## Creates a new entity
+  runnableExamples():
+    var reg = newRegistry()
+    var ent = reg.newEntity()
+  if ent == -1:
+    reg.entityLast.inc
+  else:
+    reg.entityLast = Entity(ent)
   reg.validEntities.incl(reg.entityLast)
   return reg.entityLast
 
+
 proc addComponentDestructor*[T](reg: Registry, comp: typedesc[T], cb: ComponentDestructor) =
-  ## Registers a destructor which gets called on component destruction
-  ## ComponentDestructor can be closures eg:
-  ## .. code-block:: nim
-  ##  type CObj = object
-  ##    ss: string
-  ##  var cobj = CObj(ss: "foo")
-  ##  proc healthDestructor(reg: Registry, comp: Component) =
-  ##    echo cobj.ss # <- bound object
-  ##    echo "In health destructor:", $(Health(comp).health)
-  ##  reg.addComponentDestructor(Health, healthDestructor) # <- register destructor
-  ##  reg.removeComponent(ee, Health) # <- calls the destructor then removes the component
+  ## Registers a destructor which gets called on component destruction.
+  ## ComponentDestructor can be a closure.
+  runnableExamples():
+    type
+      Health = ref object of Component
+        health: int
+        maxHealth: int
+    var reg = newRegistry()
+    var ee = reg.newEntity()
+    reg.addComponent(ee, Health(health: 100, maxHealth: 200))
+    type CObj = object # declare a bound obj, that is available in the callback
+      ss: string
+    var cobj = CObj(ss: "foo")
+    proc healthDestructor(reg: Registry, ent: Entity, comp: Component) {.gcsafe.} =
+      echo cobj.ss # <- bound object
+      echo "In health destructor:", $(Health(comp).health)
+    reg.addComponentDestructor(Health, healthDestructor) # <- register destructor
+    reg.removeComponent(ee, Health) # <- calls the destructor then removes the component
+
   const componentHash = ($T).hash()
   reg.componentDestructors[componentHash] = cb
 
+
 proc addComponent*[T](reg: Registry, ent: Entity, comp: T) {.inline.} =
+  ## Registers a new component with the entity
+  runnableExamples:
+    var reg = newRegistry()
+    var ent = reg.newEntity()
+    type Health = ref object of Component
+      health: int
+    var compHealth = Health(health: 100)
+    reg.addComponent(ent, compHealth)
+
   const componentHash = ($T).hash()
   if not reg.components.hasKey(componentHash):
     reg.components[componentHash] = newTable[Entity, Component]()
   reg.components[componentHash][ent] = comp
 
-proc getComponent*[T](reg: Registry, ent: Entity): T {.inline.} =
-  const componentHash = ($T).hash()
+
+proc getComponent*(reg: Registry, ent: Entity, ty: typedesc): ty {.inline.} =
+  ## get a component from an entity
+  runnableExamples:
+    var reg = newRegistry()
+    var ent = reg.newEntity()
+    type Health = ref object of Component
+      health: int
+    reg.addComponent(ent, Health(health: 100))
+    var compHealth = reg.getComponent(ent, Health)
+
+  const componentHash = ($ty.type).hash()
   when not defined(release):
     if not reg.components.hasKey(componentHash):
-      raise newException(ValueError, "No store for this component: " & $(T))
+      raise newException(ValueError, "No store for this component: " & $(ty.type))
     if not reg.validEntities.contains(ent):
       raise newException(ValueError, "Entity " & $ent & " is invalidated!")
     if not reg.components[componentHash].hasKey(ent):
-      raise newException(ValueError, "Entity " & $ent & " has no component:" & $(T))
-  return (T) reg.components[componentHash][ent]
+      raise newException(ValueError, "Entity " & $ent & " has no component:" & $(ty.type))
+  return (ty) reg.components[componentHash][ent]
 
-proc getComponent*(reg: Registry, ent: Entity, T: typedesc): T {.inline.} =
-  ## convenient proc to enable this:
-  ##  reg.getComponent(FooComponent, ent)
-  return getComponent[T](reg, ent)
 
-proc removeComponent*[T](reg: Registry, ent: Entity) {.inline.} =
+proc removeComponent*(reg: Registry, ent: Entity, ty: typedesc) {.inline.} =
   ## removes a component, also calls it destructor
   ## previously registered with `addComponentDestructor`
-  const componentHash = ($T).hash()
+  const componentHash = ($ty).hash()
   when not defined(release):
     if not reg.components.hasKey(componentHash):
-      raise newException(ValueError, "No store for this component: " & $(T))
+      raise newException(ValueError, "No store for this component: " & $(ty))
   if not reg.components[componentHash].hasKey(ent):
     return
   if reg.componentDestructors.hasKey(componentHash):
@@ -80,23 +191,15 @@ proc removeComponent*[T](reg: Registry, ent: Entity) {.inline.} =
     dest(reg, ent, reg.components[componentHash][ent])
   reg.components[componentHash].del(ent)
 
-proc removeComponent*(reg: Registry, ent: Entity, T: typedesc) {.inline.} =
-  ## convenient proc to enable this:
-  ##  reg.removeComponent(FooComponent, ent)
-  removeComponent[T](reg, ent)
 
-proc hasComponent[T](reg: Registry, ent: Entity): bool {.inline.} =
-  const componentHash = ($T).hash()
+proc hasComponent*(reg: Registry, ent: Entity, ty: typedesc): bool {.inline.} =
+  const componentHash = ($ty).hash()
   if not reg.components.hasKey(componentHash):
     return false # when no store exists entity cannot have the component
   if not reg.validEntities.contains((int)ent):
     return false
   return reg.components[componentHash].hasKey(ent)
 
-proc hasComponent*(reg: Registry, ent: Entity, T: typedesc): bool {.inline.} =
-  ## convenient proc to enable this:
-  ##  reg.hasComponent(FooComponent, ent)
-  hasComponent[T](reg, ent)
 
 proc invalidateEntity*(reg: Registry, ent: Entity) {.inline.} =
   ## Invalidates an entity, this can be called in a loop,
@@ -105,11 +208,13 @@ proc invalidateEntity*(reg: Registry, ent: Entity) {.inline.} =
   reg.validEntities.excl(ent)
   reg.invalideEntities.incl(ent)
 
+
 proc invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) {.inline.} =
   ## invalidates all entities, except the ones in `filter`
   for ent in reg.validEntities:
     if not filter.contains(ent):
       reg.invalidateEntity(ent.Entity)
+
 
 proc destroyEntity*(reg: Registry, ent: Entity) {.inline, gcsafe.} =
   ## removes all registered components for this entity
@@ -122,20 +227,25 @@ proc destroyEntity*(reg: Registry, ent: Entity) {.inline, gcsafe.} =
       store.del(ent)
   reg.validEntities.excl(ent)
 
+
 proc cleanup*(reg: Registry) {.inline.} =
-  ## removes all invalidated entities
-  ## call this periodically.
+  ## Removes all invalidated entities.
+  ## Call this periodically.
   ## Note: This calls the component destructors (if any)
   ## of previously invalidated objects!
   for ent in reg.invalideEntities:
     reg.destroyEntity((Entity) ent)
   reg.invalideEntities.clear()
 
+# proc update*(reg: Registry) {.inline.} =
+  # This
+
 proc destroyAll*(reg: Registry) {.inline.} =
   ## removes all entities, calls the component destructors (if any)
   let buf = reg.validEntities # buffer needed because iterating while deleting does not work
   for ent in buf:
     reg.destroyEntity((Entity) ent)
+
 
 iterator entities*(reg: Registry, T: typedesc, invalidate = false): Entity {.inline.} =
   const componentHash = ($T).hash()
@@ -145,56 +255,93 @@ iterator entities*(reg: Registry, T: typedesc, invalidate = false): Entity {.inl
       if invalidate or reg.validEntities.contains(ent):
         yield ent
 
-# iterator entities[A](reg: Registry, aa: typedesc[A]): tuple[ent: Entity, a: A] =
-#   for ent in reg.entities(A):
-#     if reg.hasComponent(ent, aa) and reg.hasComponent(ent, bb):
-#       yield (ent: ent, a: reg.getComponent(ent, A), b: reg.getComponent(ent, B))
-# iterator entitiesWithComp2*(reg: Registry, T: typedesc, invalidate = false): tuple[ent: Entity, comp: T] {.inline.} =
-import sequtils, sets
-iterator entitiesWithComp2*[A, B](reg: Registry, aa: typedesc[A], bb: typedesc[B]): tuple[ent: Entity, a: A, b: B] =
-  let h1 = ($aa).hash()
-  let h2 = ($bb).hash()
-  if reg.components.hasKey(h1) and reg.components.hasKey(h2):
-    let hs1 = toHashSet[Entity](toSeq(reg.components[h1].keys()))
-    let hs2 = toHashSet[Entity](toSeq(reg.components[h2].keys()))
-    let res = hs1 * hs2
-    for ent in res:
-      yield (ent: ent, a: A reg.components[h1][ent], b: B reg.components[h2][ent])
 
-
-
-iterator entitiesWithComp*(reg: Registry, T: typedesc, invalidate = false): tuple[ent: Entity, comp: T] {.inline.} =
+iterator entitiesWithComp*(reg: Registry, T: typedesc): tuple[ent: Entity, comp: T] {.inline.} =
   const componentHash = ($T).hash()
   if reg.components.hasKey(componentHash):
     # raise newException(ValueError, "No store for this component: " & $(T)) # TODO raise?
     for ent, comp in reg.components[componentHash]:
-      if invalidate or reg.validEntities.contains((int)ent):
+      if reg.validEntities.contains((int)ent):
         yield (ent: ent, comp: T(comp))
 
-iterator entitiesWithCompSlow*[A](reg: Registry, aa: typedesc[A]): tuple[ent: Entity, a: A] {.inline.} =
-  # TODO SLOW! Remove!
-  for ent in reg.entities(A):
-      yield (ent: ent, a: reg.getComponent(ent, A))
-
-iterator entitiesWithComp*[A, B](reg: Registry, aa: typedesc[A], bb: typedesc[B]): tuple[ent: Entity, a: A, b: B] =
+iterator entitiesWithComp*[A, B](reg: Registry, aa: typedesc[A], bb: typedesc[B]): tuple[ent: Entity, a: A, b: B] {.inline.} =
   for ent, compA in reg.entitiesWithComp(A):
     if reg.hasComponent(ent, bb):
       yield (ent: ent, a: compA, b: reg.getComponent(ent, B))
 
-iterator entitiesWithComp*[A, B, C](reg: Registry, aa: typedesc[A], bb: typedesc[B], cc: typedesc[C]): tuple[ent: Entity, a: A, b: B, c: C] =
+
+iterator entitiesWithComp*[A, B, C](reg: Registry, aa: typedesc[A], bb: typedesc[B], cc: typedesc[C]): tuple[ent: Entity, a: A, b: B, c: C] {.inline.} =
   for ent, compA in reg.entitiesWithComp(A):
     if reg.hasComponent(ent, bb) and reg.hasComponent(ent, cc):
       yield (ent: ent, a: compA, b: reg.getComponent(ent, B), c: reg.getComponent(ent, C))
+
 
 proc getStore*(reg: Registry, T: typedesc): ComponentStore {.inline.} =
   const componentHash = ($T).hash()
   return reg.components[componentHash]
 
 
+# ### The event system
+proc connect*(reg: Registry, ty: typedesc, cb: proc (ev: ty.type)) =
+  ## Connect a proc to a event
+  runnableExamples:
+    var reg = newRegistry()
+    type
+      MyEvent = object
+        hihi: string
+    var boundObj = "foo"
+    proc cbMyEvent(ev: MyEvent) =
+      echo "my event was triggered", ev.hihi
+      echo boundObj # events can be closures!
+    reg.connect(MyEvent, cbMyEvent)
 
-##########################################
+  const typehash = hash($ty)
+  if not reg.ev.hasKey(typehash):
+    reg.ev[typehash] = initIntSet()
+  reg.ev[typehash].incl cast[int](rawProc cb)
+
+
+proc disconnect*(reg: Registry, ty: typedesc, cb: pointer) =
+  ## Disconnect a proc from a event
+  runnableExamples:
+    var reg = newRegistry()
+    type
+      MyEvent = object
+    proc cbMyEvent(ev: MyEvent) =
+      discard
+    reg.connect(MyEvent, cbMyEvent)
+    reg.disconnect(MyEvent, cbMyEvent)
+
+  const typehash = hash($ty.type)
+  if not reg.ev.hasKey(typehash): return
+  reg.ev[typehash].excl cast[int](cb)
+
+
+proc disconnectAll*(reg: Registry, ty: typedesc) =
+  ## Disconnect all procs from a event
+  const typehash = hash($ty.type)
+  if not reg.ev.hasKey(typehash): return
+  reg.ev[typehash].clear()
+
+
+proc trigger*(reg: Registry, ev: auto) =
+  ## Triggers all the handlers bound for an event immediately!
+  const typehash = hash($ev.type)
+  if not reg.ev.hasKey(typehash): return
+  for pcb in reg.ev[typehash]:
+    type pp = proc (ev: ev.type) {.nimcall.}
+    cast[pp](pcb)(ev)
+
+# proc triggerLater*(reg: Registry, ev: auto) =
+#   ## Enqeues an event to be triggered on reg.update()
+#   const typehash = hash($ev.type)
+#   if not reg.ev.hasKey(typehash): return
+#   reg.evs[typehash].addLast(ev)
+
+
+# #########################################
 # Tests
-##########################################
+# #########################################
 when isMainModule and true:
   import unittest
   suite "ecs":
@@ -220,7 +367,7 @@ when isMainModule and true:
         check h1.health == 10
         check h1.maxHealth == 100
       block:
-        var h1 = getComponent[Health](reg, e1)
+        var h1 = getComponent(reg, e1, Health)
         h1.health = 20
         check reg.getComponent(e1, Health).health == 20
       check reg.hasComponent(e1, Health) == true
@@ -228,7 +375,7 @@ when isMainModule and true:
       check reg.hasComponent(e1, Health) == false
     test "not there":
       doAssertRaises(ValueError):
-        discard getComponent[Kaka](reg, e1)
+        discard getComponent(reg, e1, Kaka)
       check reg.hasComponent(e1, Kaka) == false
     test "destroy entity":
       reg = newRegistry()
@@ -354,7 +501,7 @@ when isMainModule and true:
     test "entities with comp overloads":
       reg = newRegistry()
       var ee1 = reg.newEntity()
-      reg.addComponent(ee1, Health(health: 123))
+      reg.addComponent(ee1, Health(health: 321))
       var ee2 = reg.newEntity()
       reg.addComponent(ee2, Health(health: 321))
       reg.addComponent(ee2, Mana(mana: 321))
@@ -366,9 +513,98 @@ when isMainModule and true:
       check idx == 1
       check reg.getComponent(ee2, Health).health == 642
       check reg.getComponent(ee2, Mana).mana == 642
+    test "entities with comp overloads 3 types":
+      reg = newRegistry()
+      var ee1 = reg.newEntity()
+      reg.addComponent(ee1, Health(health: 321))
+      reg.addComponent(ee1, Mana(mana: 321))
+      reg.addComponent(ee1, Kaka(mana: 321))
+      var idx = 0
+      for (ent, compHealth, compMana, compKaka) in reg.entitiesWithComp(Health, Mana, Kaka):
+        idx.inc
+        compHealth.health = compHealth.health * 2
+        compMana.mana = compMana.mana * 2
+        compKaka.mana = compKaka.mana * 2
+      check idx == 1
+      check reg.getComponent(ee1, Health).health == 642
+      check reg.getComponent(ee1, Mana).mana == 642
+      check reg.getComponent(ee1, Kaka).mana == 642
+  suite "ecs->events":
+    setup:
+      var reg = newRegistry()
+      type
+        MyEvent = object
+          hihi: string
+          hoho: int
+          ents: seq[int]
+        SomeOtherEvent = object
+          ents: seq[int]
+      var obj = 0 #"From bound obj: asdads" # A bound obj
+      proc cbMyEvent(ev: MyEvent)  =
+        # echo "my event was triggered", ev.hihi, ev.hoho
+        obj.inc
+      proc cbMyEvent2(ev: MyEvent) =
+        # echo "my event was triggered TWO", ev.hihi, ev.hoho
+        obj.inc(2)
+      proc cbSomeOtherEvent(ev: SomeOtherEvent) =
+        echo "cbSomeOtherEvent", ev.ents
+        obj.inc(3)
+      proc cbSomeOtherEvent2(ev: SomeOtherEvent) =
+        echo "cbSomeOtherEvent2", ev.ents
+        for ent in ev.ents:
+          echo "ENT: ", ent
+        obj.inc(4)
+    test "simple events":
+      reg.connect(MyEvent, cbMyEvent)
+      reg.connect(MyEvent, cbMyEvent2)
+      var myev = MyEvent()
+      myev.hihi = "hihi"
+      myev.hoho = 1337
+      myev.ents = @[1,2,3]
+      reg.trigger(myev)
+      check obj == 3
+    test "simple events disconnect":
+      reg.connect(MyEvent, cbMyEvent)
+      reg.connect(MyEvent, cbMyEvent2)
+      var myev = MyEvent()
+      reg.trigger(myev)
+      check obj == 3
+      reg.disconnect(MyEvent, cbMyEvent2)
+      reg.trigger(myev)
+      check obj == 4
+    test "simple events disconnect all":
+      reg.connect(MyEvent, cbMyEvent)
+      reg.connect(MyEvent, cbMyEvent2)
+      var myev = MyEvent()
+      reg.trigger(myev)
+      check obj == 3
+      reg.disconnectAll(MyEvent)
+      reg.trigger(myev)
+      check obj == 3
+    test "compile time type safety":
+      check compiles(reg.connect(MyEvent, cbSomeOtherEvent)) == false
+      check compiles(reg.connect(SomeOtherEvent, cbMyEvent2)) == false
 
 
 when isMainModule and false:
+
+  import sequtils, sets
+  iterator entitiesWithComp2[A, B](reg: Registry, aa: typedesc[A], bb: typedesc[B]): tuple[ent: Entity, a: A, b: B] =
+    let h1 = ($aa).hash()
+    let h2 = ($bb).hash()
+    if reg.components.hasKey(h1) and reg.components.hasKey(h2):
+      let hs1 = toHashSet[Entity](toSeq(reg.components[h1].keys()))
+      let hs2 = toHashSet[Entity](toSeq(reg.components[h2].keys()))
+      let res = hs1 * hs2
+      for ent in res:
+        yield (ent: ent, a: A reg.components[h1][ent], b: B reg.components[h2][ent])
+
+
+  iterator entitiesWithCompSlow[A](reg: Registry, aa: typedesc[A]): tuple[ent: Entity, a: A] {.inline.} =
+    # TODO SLOW! Remove!
+    for ent in reg.entities(A):
+        yield (ent: ent, a: reg.getComponent(ent, A))
+
   import benchy
   type
     Health = ref object of Component
