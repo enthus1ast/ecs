@@ -1,79 +1,6 @@
 ## A simple Entity Component System.
 ## With event system.
-runnableExamples:
 
-  var reg = newRegistry()
-
-  type
-    Health = ref object of Component
-      health: int
-      maxHealth: int
-      dead: bool
-    Regeneration = ref object of Component
-      healthRegen: int
-    Poisoned = ref object of Component
-      poisonStrength: int
-    Corpse = ref object of Component
-
-  var entPlayer = reg.newEntity() # a new Entity, store this and move this around.
-  reg.addComponent(entPlayer, Health(health: 50, maxHealth: 100))
-  reg.addComponent(entPlayer, Regeneration(healthRegen: 2))
-
-  var entPlayer2 = reg.newEntity() # a new Entity, store this and move this around.
-  reg.addComponent(entPlayer2, Health(health: 50, maxHealth: 100))
-  reg.addComponent(entPlayer2, Poisoned(poisonStrength: 1))
-
-  # Events example
-  type
-    EvDied = object
-      ent: Entity
-
-  proc cbDied(ev: EvDied) =
-    echo "entity died:", ev.ent
-    var compHealth = reg.getComponent(ev.ent, Health)
-    compHealth.dead = true
-
-    # remove the `Health` component upon dead
-    # reg.removeComponent(ev.ent, Health) # TODO cannot currently be done
-
-    echo "make this entity to a corpse"
-    reg.addComponent(ev.ent, Corpse())
-
-  reg.connect(EvDied, cbDied) # connect a callback to this event
-
-  proc systemHealth(reg: Registry) =
-    for (ent, compHealth) in reg.entitiesWithComp(Health):
-      if compHealth.dead: continue
-      echo ent, ": ", compHealth[]
-      if compHealth.health <= 0:
-        reg.trigger(EvDied(ent: ent)) # Triggers the EvDied event handlers
-        # reg.triggerLater(Ev)
-
-  proc systemPoison(reg: Registry) =
-    for (ent, compPoison, compHealth) in reg.entitiesWithComp(Poisoned, Health):
-      if not compHealth.dead:
-        compHealth.health -= compPoison.poisonStrength
-
-  proc systemRegen(reg: Registry) =
-    # regenerate health over time
-    for (ent, compRegeneration, compHealth) in reg.entitiesWithComp(Regeneration, Health):
-      if not compHealth.dead:
-        compHealth.health += compRegeneration.healthRegen
-        if compHealth.health > compHealth.maxHealth:
-          compHealth.health = compHealth.maxHealth
-
-  var limitExecution = 100
-  while true: ## games main loop
-
-    # do all the good stuff...
-
-    # Call systems
-    reg.systemRegen()
-    reg.systemPoison()
-    reg.systemHealth()
-
-    limitExecution -= 1
-    if limitExecution == 0: break
 
 # ----------------------- Implementation
 import tables, hashes, intsets, std/deques
@@ -91,19 +18,22 @@ type
     components: TableRef[Hash, ComponentStore]
     componentDestructors: ComponentDestructors
     ev: Table[Hash, IntSet] ## container for events
-    # evs: Table[Hash, Deque[pointer]]
+    # evs: Deque[proc ()] ## the storage for triggerLater closures
+    removeComponentLaterStore: seq[tuple[ent: Entity, tyh: Hash]]
   ComponentObj* = object of RootObj
   Component* = ref object of RootObj
 
-proc newRegistry*(): Registry =
+func newRegistry*(): Registry =
   ## Returns a new `Registry` this is the main object of the ECS
   result = Registry()
   result.entityLast = 0
   result.components = newTable[Hash, ComponentStore]()
   result.componentDestructors = newTable[Hash, ComponentDestructor]()
 
+func isValid*(reg: Registry, ent: Entity): bool {.inline.} =
+  return reg.validEntities.contains(ent)
 
-proc newEntity*(reg: Registry, ent = -1): Entity {.inline.} =
+func newEntity*(reg: Registry, ent = -1): Entity {.inline.} =
   ## Creates a new entity
   runnableExamples():
     var reg = newRegistry()
@@ -140,7 +70,7 @@ proc addComponentDestructor*[T](reg: Registry, comp: typedesc[T], cb: ComponentD
   reg.componentDestructors[componentHash] = cb
 
 
-proc addComponent*[T](reg: Registry, ent: Entity, comp: T) {.inline.} =
+func addComponent*[T](reg: Registry, ent: Entity, comp: T) {.inline.} =
   ## Registers a new component with the entity
   runnableExamples:
     var reg = newRegistry()
@@ -156,7 +86,7 @@ proc addComponent*[T](reg: Registry, ent: Entity, comp: T) {.inline.} =
   reg.components[componentHash][ent] = comp
 
 
-proc getComponent*(reg: Registry, ent: Entity, ty: typedesc): ty {.inline.} =
+func getComponent*(reg: Registry, ent: Entity, ty: typedesc): ty {.inline.} =
   ## get a component from an entity
   runnableExamples:
     var reg = newRegistry()
@@ -177,10 +107,13 @@ proc getComponent*(reg: Registry, ent: Entity, ty: typedesc): ty {.inline.} =
   return (ty) reg.components[componentHash][ent]
 
 
-proc removeComponent*(reg: Registry, ent: Entity, ty: typedesc) {.inline.} =
+proc removeComponent*(reg: Registry, ent: Entity, ty: typedesc | Hash) {.inline.} =
   ## removes a component, also calls it destructor
   ## previously registered with `addComponentDestructor`
-  const componentHash = ($ty).hash()
+  when ty is typedesc:
+    const componentHash = ($ty).hash()
+  else:
+    let componentHash = ty
   when not defined(release):
     if not reg.components.hasKey(componentHash):
       raise newException(ValueError, "No store for this component: " & $(ty))
@@ -191,8 +124,14 @@ proc removeComponent*(reg: Registry, ent: Entity, ty: typedesc) {.inline.} =
     dest(reg, ent, reg.components[componentHash][ent])
   reg.components[componentHash].del(ent)
 
+proc removeComponentLater*(reg: Registry, ent: Entity, ty: typedesc) {.inline.} =
+  ## Enques a component for later destruction (through reg.update)
+  # reg.
+  discard
+  const componentHash = hash($ty)
+  reg.removeComponentLaterStore.add( (ent, componentHash) )
 
-proc hasComponent*(reg: Registry, ent: Entity, ty: typedesc): bool {.inline.} =
+func hasComponent*(reg: Registry, ent: Entity, ty: typedesc): bool {.inline.} =
   const componentHash = ($ty).hash()
   if not reg.components.hasKey(componentHash):
     return false # when no store exists entity cannot have the component
@@ -201,7 +140,7 @@ proc hasComponent*(reg: Registry, ent: Entity, ty: typedesc): bool {.inline.} =
   return reg.components[componentHash].hasKey(ent)
 
 
-proc invalidateEntity*(reg: Registry, ent: Entity) {.inline.} =
+func invalidateEntity*(reg: Registry, ent: Entity) {.inline.} =
   ## Invalidates an entity, this can be called in a loop,
   ## make sure you call `cleanup()` once in a while to remove invalidated entities
   ## This does NOT call the Component destructor immediately, `cleanup` will
@@ -209,7 +148,7 @@ proc invalidateEntity*(reg: Registry, ent: Entity) {.inline.} =
   reg.invalideEntities.incl(ent)
 
 
-proc invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) {.inline.} =
+func invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) {.inline.} =
   ## invalidates all entities, except the ones in `filter`
   for ent in reg.validEntities:
     if not filter.contains(ent):
@@ -237,8 +176,6 @@ proc cleanup*(reg: Registry) {.inline.} =
     reg.destroyEntity((Entity) ent)
   reg.invalideEntities.clear()
 
-# proc update*(reg: Registry) {.inline.} =
-  # This
 
 proc destroyAll*(reg: Registry) {.inline.} =
   ## removes all entities, calls the component destructors (if any)
@@ -263,6 +200,7 @@ iterator entitiesWithComp*(reg: Registry, T: typedesc): tuple[ent: Entity, comp:
     for ent, comp in reg.components[componentHash]:
       if reg.validEntities.contains((int)ent):
         yield (ent: ent, comp: T(comp))
+
 
 iterator entitiesWithComp*[A, B](reg: Registry, aa: typedesc[A], bb: typedesc[B]): tuple[ent: Entity, a: A, b: B] {.inline.} =
   for ent, compA in reg.entitiesWithComp(A):
@@ -324,20 +262,142 @@ proc disconnectAll*(reg: Registry, ty: typedesc) =
   reg.ev[typehash].clear()
 
 
-proc trigger*(reg: Registry, ev: auto) =
+proc trigger*(reg: Registry, ev: auto) {.gcsafe.} =
   ## Triggers all the handlers bound for an event immediately!
+  ## If this is called from a system, i currently cannot
+  ## remove its component, since we iterate over them... # TODO
   const typehash = hash($ev.type)
   if not reg.ev.hasKey(typehash): return
   for pcb in reg.ev[typehash]:
-    type pp = proc (ev: ev.type) {.nimcall.}
+    type pp = proc (ev: ev.type) {.nimcall, gcsafe.}
     cast[pp](pcb)(ev)
 
+
+# TODO does not work because of: Error: unhandled exception: field 'sym' is not accessible for type 'TNode' using 'kind = nkClosure' [FieldDefect]
 # proc triggerLater*(reg: Registry, ev: auto) =
 #   ## Enqeues an event to be triggered on reg.update()
 #   const typehash = hash($ev.type)
 #   if not reg.ev.hasKey(typehash): return
-#   reg.evs[typehash].addLast(ev)
+#   # reg.evs[typehash].addLast(ev)
+#   type ppi = proc (ev: ev.type) {.nimcall.}
+#   for pcbb in reg.ev[typehash]:
+#     proc clos() {.closure.} =
+#       cast[ppi](pcbb)(ev)
+#     addLast(reg.evs, clos)
 
+
+proc update*(reg: Registry) =
+  ##  - Deletes invalidated entities
+  ##  - Triggers encqued procs
+  reg.cleanup() # cleanup invalidated entities
+  for (ent, tyh) in reg.removeComponentLaterStore:
+    reg.removeComponent(ent, tyh)
+
+  # for clos in reg.evs:
+  #   cast[proc () {.nimcall.}](clos)()
+
+
+# #########################################
+# Global Example
+# #########################################
+runnableExamples:
+
+  var reg = newRegistry()
+
+  type
+    Health = ref object of Component
+      health: int
+      maxHealth: int
+      dead: bool
+    Regeneration = ref object of Component
+      healthRegen: int
+    Poisoned = ref object of Component
+      poisonStrength: int
+    Corpse = ref object of Component
+
+  var entPlayer = reg.newEntity() # a new Entity, store this and move this around.
+  reg.addComponent(entPlayer, Health(health: 50, maxHealth: 100))
+  reg.addComponent(entPlayer, Regeneration(healthRegen: 2))
+
+  var entPlayer2 = reg.newEntity() # a new Entity, store this and move this around.
+  reg.addComponent(entPlayer2, Health(health: 50, maxHealth: 100))
+  reg.addComponent(entPlayer2, Poisoned(poisonStrength: 1))
+
+  var entPlayer3 = reg.newEntity() # a new Entity, store this and move this around.
+  reg.addComponent(entPlayer3, Health(health: 50, maxHealth: 100))
+  reg.addComponent(entPlayer3, Regeneration(healthRegen: 5))
+  reg.addComponent(entPlayer3, Poisoned(poisonStrength: 10))
+
+  # Events example
+  type
+    EvDied = object
+      ent: Entity
+
+  # The benefit of of Events is that various parts
+  # of your application or game, can connect to
+  # an event. The various parts are therefore decoupled and can be disabled or added easily
+  block: ## "ConsoleSubsystem.nim"
+    proc cbDied(ev: EvDied) =
+      echo "entity died:", ev.ent
+      var compHealth = reg.getComponent(ev.ent, Health)
+      compHealth.dead = true # later we will also remove the component
+      # remove the `Health` component upon dead (as an example)
+      reg.removeComponentLater(ev.ent, Health) # will later be removed on reg.update()
+      echo "make this entity to a corpse"
+      reg.addComponent(ev.ent, Corpse())
+    reg.connect(EvDied, cbDied) # connect a callback to this event
+
+  block: ## "SoundSubsystem.nim"
+    proc cbDied(ev: EvDied) =
+      echo "entity died, <PLAY A SOUND>:", ev.ent
+    reg.connect(EvDied, cbDied) # connect a callback to this event
+
+  proc systemHealth(reg: Registry) =
+    for (ent, compHealth) in reg.entitiesWithComp(Health):
+      if compHealth.dead: continue
+      echo ent, ": ", compHealth[]
+      if compHealth.health <= 0:
+        reg.trigger(EvDied(ent: ent)) # Triggers the EvDied event handlers
+        # reg.triggerLater(Ev)
+
+  proc systemPoison(reg: Registry) =
+    for (ent, compPoison, compHealth) in reg.entitiesWithComp(Poisoned, Health):
+      if not compHealth.dead:
+        compHealth.health -= compPoison.poisonStrength
+
+  proc systemRegen(reg: Registry) =
+    # regenerate health over time
+    for (ent, compRegeneration, compHealth) in reg.entitiesWithComp(Regeneration, Health):
+      if not compHealth.dead:
+        compHealth.health += compRegeneration.healthRegen
+        if compHealth.health > compHealth.maxHealth:
+          compHealth.health = compHealth.maxHealth
+
+  proc systemCorpse(reg: Registry) =
+    ## A system that just prints out the corpse count (if any)
+    try:
+      let corpses = reg.getStore(Corpse).len
+      if corpses == 1:
+        echo "Only one dead body, nothing special..."
+      elif corpses > 1:
+        echo "Dead bodies everywhere: ", corpses
+    except:
+      discard # it could be that we do not have a store for corpses yet... # TODO ?
+
+  var limitExecution = 60
+  while true: ## games main loop
+
+    # do all the good stuff...
+
+    # Call systems
+    reg.systemRegen()
+    reg.systemPoison()
+    reg.systemHealth()
+    reg.systemCorpse()
+    reg.update()
+
+    limitExecution -= 1
+    if limitExecution == 0: break
 
 # #########################################
 # Tests
@@ -549,7 +609,7 @@ when isMainModule and true:
       proc cbSomeOtherEvent(ev: SomeOtherEvent) =
         echo "cbSomeOtherEvent", ev.ents
         obj.inc(3)
-      proc cbSomeOtherEvent2(ev: SomeOtherEvent) =
+      proc cbSomeOtherEvent2(ev: SomeOtherEvent)  =
         echo "cbSomeOtherEvent2", ev.ents
         for ent in ev.ents:
           echo "ENT: ", ent
@@ -584,6 +644,12 @@ when isMainModule and true:
     test "compile time type safety":
       check compiles(reg.connect(MyEvent, cbSomeOtherEvent)) == false
       check compiles(reg.connect(SomeOtherEvent, cbMyEvent2)) == false
+    # test "triggerLater":
+    #   reg.connect(MyEvent, cbMyEvent)
+    #   var myev = MyEvent()
+    #   reg.triggerLater(myev)
+    #   check obj == 0
+
 
 
 when isMainModule and false:
