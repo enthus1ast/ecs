@@ -3,7 +3,7 @@
 
 
 # ----------------------- Implementation
-import tables, hashes, intsets, std/deques
+import tables, hashes, intsets, std/deques, macros
 export tables, intsets
 
 type
@@ -23,12 +23,18 @@ type
   ComponentObj* = object of RootObj
   Component* = ref object of RootObj
 
+
 func newRegistry*(): Registry =
   ## Returns a new `Registry` this is the main object of the ECS
   result = Registry()
   result.entityLast = 0
   result.components = newTable[Hash, ComponentStore]()
   result.componentDestructors = newTable[Hash, ComponentDestructor]()
+
+
+func len*(reg: Registry): int =
+  return reg.validEntities.len
+
 
 func isValid*(reg: Registry, ent: Entity): bool {.inline.} =
   return reg.validEntities.contains(ent)
@@ -44,6 +50,8 @@ func newEntity*(reg: Registry, ent = -1): Entity {.inline.} =
     reg.entityLast = Entity(ent)
   reg.validEntities.incl(reg.entityLast)
   return reg.entityLast
+template newEntity*(ent = -1): Entity =
+  newEntity(reg, ent)
 
 
 proc addComponentDestructor*[T](reg: Registry, comp: typedesc[T], cb: ComponentDestructor) =
@@ -68,6 +76,8 @@ proc addComponentDestructor*[T](reg: Registry, comp: typedesc[T], cb: ComponentD
 
   const componentHash = ($T).hash()
   reg.componentDestructors[componentHash] = cb
+template addComponentDestructor*[T](comp: typedesc[T], cb: ComponentDestructor) =
+  addComponentDestructor(reg, comp, cb)
 
 
 func addComponent*[T](reg: Registry, ent: Entity, comp: T) {.inline.} =
@@ -84,7 +94,13 @@ func addComponent*[T](reg: Registry, ent: Entity, comp: T) {.inline.} =
   if not reg.components.hasKey(componentHash):
     reg.components[componentHash] = newTable[Entity, Component]()
   reg.components[componentHash][ent] = comp
+template addComponent*[T](ent: Entity, comp: T) =
+  addComponent(reg, ent, comp)
 
+
+template `:=`*[T](ent: Entity, comp: T) =
+  ## addComponent but uses global reg
+  reg.addComponent(ent, comp)
 
 func getComponent*(reg: Registry, ent: Entity, ty: typedesc): ty {.inline.} =
   ## get a component from an entity
@@ -105,6 +121,10 @@ func getComponent*(reg: Registry, ent: Entity, ty: typedesc): ty {.inline.} =
     if not reg.components[componentHash].hasKey(ent):
       raise newException(ValueError, "Entity " & $ent & " has no component:" & $(ty.type))
   return (ty) reg.components[componentHash][ent]
+template getComponent*(ent: Entity, ty: typedesc): untyped =
+  getComponent(reg, ent, ty)
+template `[]`*(ent: Entity, ty: typedesc): untyped =
+  getComponent(reg, ent, ty)
 
 
 proc removeComponent*(reg: Registry, ent: Entity, ty: typedesc | Hash) {.inline.} =
@@ -123,6 +143,9 @@ proc removeComponent*(reg: Registry, ent: Entity, ty: typedesc | Hash) {.inline.
     let dest = reg.componentDestructors[componentHash] # (reg, reg.components[componentHash][ent])
     dest(reg, ent, reg.components[componentHash][ent])
   reg.components[componentHash].del(ent)
+template removeComponent*(ent: Entity, ty: typedesc | Hash) =
+  removeComponent(reg, ent, ty)
+
 
 proc removeComponentLater*(reg: Registry, ent: Entity, ty: typedesc) {.inline.} =
   ## Enques a component for later destruction (through reg.update)
@@ -130,6 +153,9 @@ proc removeComponentLater*(reg: Registry, ent: Entity, ty: typedesc) {.inline.} 
   discard
   const componentHash = hash($ty)
   reg.removeComponentLaterStore.add( (ent, componentHash) )
+template removeComponentLater*(ent: Entity, ty: typedesc) =
+  removeComponentLater(reg, ent, ty)
+
 
 func hasComponent*(reg: Registry, ent: Entity, ty: typedesc): bool {.inline.} =
   const componentHash = ($ty).hash()
@@ -138,6 +164,8 @@ func hasComponent*(reg: Registry, ent: Entity, ty: typedesc): bool {.inline.} =
   if not reg.validEntities.contains((int)ent):
     return false
   return reg.components[componentHash].hasKey(ent)
+template hasComponent*(ent: Entity, ty: typedesc): bool =
+  hasComponent(reg, ent, ty)
 
 
 func invalidateEntity*(reg: Registry, ent: Entity) {.inline.} =
@@ -146,6 +174,9 @@ func invalidateEntity*(reg: Registry, ent: Entity) {.inline.} =
   ## This does NOT call the Component destructor immediately, `cleanup` will
   reg.validEntities.excl(ent)
   reg.invalideEntities.incl(ent)
+template invalidateEntity*(ent: Entity) =
+  invalidateEntity(reg, ent)
+
 
 
 func invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) {.inline.} =
@@ -153,6 +184,8 @@ func invalidateAll*(reg: Registry, filter: IntSet = initIntSet()) {.inline.} =
   for ent in reg.validEntities:
     if not filter.contains(ent):
       reg.invalidateEntity(ent.Entity)
+template invalidateAll*(filter: IntSet = initIntSet()) =
+  invalidateAll(reg, filter)
 
 
 proc destroyEntity*(reg: Registry, ent: Entity) {.inline, gcsafe.} =
@@ -165,6 +198,8 @@ proc destroyEntity*(reg: Registry, ent: Entity) {.inline, gcsafe.} =
         dest(reg, ent, store[ent])
       store.del(ent)
   reg.validEntities.excl(ent)
+template destroyEntity*(ent: Entity) =
+  destroyEntity(reg, ent)
 
 
 proc cleanup*(reg: Registry) {.inline.} =
@@ -191,6 +226,9 @@ iterator entities*(reg: Registry, T: typedesc, invalidate = false): Entity {.inl
     for ent in reg.components[componentHash].keys:
       if invalidate or reg.validEntities.contains(ent):
         yield ent
+template entities*(T: typedesc, invalidate = false): Entity =
+  entities(reg, T, invalidate)
+
 
 
 iterator entitiesWithComp*(reg: Registry, T: typedesc): tuple[ent: Entity, comp: T] {.inline.} =
@@ -200,23 +238,33 @@ iterator entitiesWithComp*(reg: Registry, T: typedesc): tuple[ent: Entity, comp:
     for ent, comp in reg.components[componentHash]:
       if reg.validEntities.contains((int)ent):
         yield (ent: ent, comp: T(comp))
+template entitiesWithComp*(T: typedesc): tuple[ent: Entity, comp: T] =
+  entitiesWithComp(reg, T)
+
 
 
 iterator entitiesWithComp*[A, B](reg: Registry, aa: typedesc[A], bb: typedesc[B]): tuple[ent: Entity, a: A, b: B] {.inline.} =
   for ent, compA in reg.entitiesWithComp(A):
     if reg.hasComponent(ent, bb):
       yield (ent: ent, a: compA, b: reg.getComponent(ent, B))
+template entitiesWithComp*[A, B](aa: typedesc[A], bb: typedesc[B]): tuple[ent: Entity, a: A, b: B] =
+  entitiesWithComp(reg, aa, bb)
+
 
 
 iterator entitiesWithComp*[A, B, C](reg: Registry, aa: typedesc[A], bb: typedesc[B], cc: typedesc[C]): tuple[ent: Entity, a: A, b: B, c: C] {.inline.} =
   for ent, compA in reg.entitiesWithComp(A):
     if reg.hasComponent(ent, bb) and reg.hasComponent(ent, cc):
       yield (ent: ent, a: compA, b: reg.getComponent(ent, B), c: reg.getComponent(ent, C))
+template entitiesWithComp*[A, B, C](aa: typedesc[A], bb: typedesc[B], cc: typedesc[C]): tuple[ent: Entity, a: A, b: B, c: C] =
+  entitiesWithComp(reg, aa, bb, cc)
 
 
 proc getStore*(reg: Registry, T: typedesc): ComponentStore {.inline.} =
   const componentHash = ($T).hash()
   return reg.components[componentHash]
+template getStore*(T: typedesc): ComponentStore =
+  getStore(reg, T)
 
 
 # ### The event system
@@ -237,6 +285,8 @@ proc connect*(reg: Registry, ty: typedesc, cb: proc (ev: ty.type)) =
   if not reg.ev.hasKey(typehash):
     reg.ev[typehash] = initIntSet()
   reg.ev[typehash].incl cast[int](rawProc cb)
+template connect*(ty: typedesc, cb: proc (ev: ty.type)) =
+  connect(reg, ty, cb)
 
 
 proc disconnect*(reg: Registry, ty: typedesc, cb: pointer) =
@@ -253,6 +303,8 @@ proc disconnect*(reg: Registry, ty: typedesc, cb: pointer) =
   const typehash = hash($ty.type)
   if not reg.ev.hasKey(typehash): return
   reg.ev[typehash].excl cast[int](cb)
+template disconnect*(ty: typedesc, cb: pointer) =
+  disconnect(reg, ty, cb)
 
 
 proc disconnectAll*(reg: Registry, ty: typedesc) =
@@ -260,6 +312,8 @@ proc disconnectAll*(reg: Registry, ty: typedesc) =
   const typehash = hash($ty.type)
   if not reg.ev.hasKey(typehash): return
   reg.ev[typehash].clear()
+template disconnectAll*(ty: typedesc) =
+  disconnectAll(reg, ty)
 
 
 proc trigger*(reg: Registry, ev: auto) {.gcsafe.} =
@@ -271,6 +325,8 @@ proc trigger*(reg: Registry, ev: auto) {.gcsafe.} =
   for pcb in reg.ev[typehash]:
     type pp = proc (ev: ev.type) {.nimcall, gcsafe.}
     cast[pp](pcb)(ev)
+template trigger*(ev: auto) =
+  trigger(reg, ev)
 
 
 # TODO does not work because of: Error: unhandled exception: field 'sym' is not accessible for type 'TNode' using 'kind = nkClosure' [FieldDefect]
@@ -589,6 +645,31 @@ when isMainModule and true:
       check reg.getComponent(ee1, Health).health == 642
       check reg.getComponent(ee1, Mana).mana == 642
       check reg.getComponent(ee1, Kaka).mana == 642
+    test "template version of api":
+      reg = newRegistry()
+      var ee1 = newEntity()
+      addComponent(ee1, Health(health: 321))
+      addComponent(ee1, Mana(mana: 642))
+      ee1 := Kaka(mana: 642)
+      for ee in entities(Health):
+        check ee == 1
+        check reg.getComponent(ee, Health).health == 321
+        check getComponent(ee, Health).health == 321
+        check ee[Health].health == 321
+      for (ent, compHealth) in entitiesWithComp(Health):
+        check ent == 1
+        check compHealth.health == 321
+      for (ent, compHealth, compMana) in entitiesWithComp(Health, Mana):
+        check ent == 1
+        check compHealth.health == 321
+        check compMana.mana == 642
+      for (ent, compHealth, compMana, compKaka) in entitiesWithComp(Health, Mana, Kaka):
+        check ent == 1
+        check compHealth.health == 321
+        check compMana.mana == 642
+        check compKaka.mana == 642
+
+
   suite "ecs->events":
     setup:
       var reg = newRegistry()
@@ -649,6 +730,7 @@ when isMainModule and true:
     #   var myev = MyEvent()
     #   reg.triggerLater(myev)
     #   check obj == 0
+
 
 
 
